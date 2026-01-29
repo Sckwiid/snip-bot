@@ -23,6 +23,8 @@ export const config = {
   dexscreenerBase: process.env.DEXSCREENER_BASE || "https://api.dexscreener.com",
   honeypotBase: process.env.HONEYPOT_BASE || "https://api.honeypot.is",
   sourceMode: process.env.SOURCE_MODE || "profiles_then_boosts", // profiles_only, boosts_only, profiles_then_boosts
+  startChannelId: process.env.START_CHANNEL_ID || process.env.DISCORD_CHANNEL_ID,
+  startMentionRoleId: process.env.START_MENTION_ROLE_ID || process.env.MENTION_ROLE_ID,
   watchedChains: process.env.CHAINS
     ? process.env.CHAINS.split(",").map((c) => c.trim().toLowerCase()).filter(Boolean)
     : DEFAULT_CHAINS,

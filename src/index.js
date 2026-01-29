@@ -178,16 +178,19 @@ async function start() {
 
   // Message de présence au démarrage pour confirmer l'accès au channel.
   try {
-    await sendToChannel(client, config.targetChannelId, {
+    const startChannelId = config.startChannelId || config.targetChannelId;
+    const startRoleId = config.startMentionRoleId || config.mentionRoleId;
+
+    await sendToChannel(client, startChannelId, {
       content: `✅ Bot démarré et à l'écoute sur les chaînes : ${config.watchedChains.join(
         ", "
-      )}${config.mentionRoleId ? ` <@&${config.mentionRoleId}>` : ""}`
+      )}${startRoleId ? ` <@&${startRoleId}>` : ""}`
     });
 
     if (config.sendMockOnStart) {
       const mocks = buildMockPayloads({ mentionRoleId: config.mentionRoleId });
       if (mocks[0]) {
-        await sendToChannel(client, config.targetChannelId, {
+        await sendToChannel(client, startChannelId, {
           content: "🧪 Test API Dexscreener (mock) — message de démarrage",
           ...mocks[0]
         });
