@@ -15,6 +15,11 @@ async function getJsonWithDebug(res, label) {
   }
 }
 
+async function safeJson(res, label = "unknown") {
+  const { data } = await getJsonWithDebug(res, label);
+  return data;
+}
+
 export async function fetchLatestTokenProfiles(limit = 25) {
   const url = `${config.dexscreenerBase}/token-profiles/latest/v1`;
   const res = await fetch(url, {
@@ -105,7 +110,7 @@ export async function fetchPairsForToken(chainId, tokenAddress) {
     throw new Error(`Dexscreener pairs HTTP ${res.status}`);
   }
 
-  const data = await safeJson(res);
+  const data = await safeJson(res, "token-pairs");
   const pairs = Array.isArray(data.pairs) ? data.pairs : [];
 
   return pairs.filter((p) => p && (!chainId || p.chainId?.toLowerCase() === chainId.toLowerCase()));

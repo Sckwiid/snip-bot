@@ -19,15 +19,145 @@ const client = createDiscordClient();
 const seenIds = new Set();
 const seenOrder = [];
 const MAX_SEEN = 500;
+const MAX_ERROR_STACK_LENGTH = 900;
+const MAX_DISCORD_MESSAGE_LENGTH = 1900;
+
+const FILTER_REASON_LABELS = {
+  chain_not_watched: "chaîne non surveillée",
+  no_token_address: "adresse token absente",
+  no_pairs: "aucune pair Dexscreener",
+  no_primary_pair: "pair principale introuvable",
+  honeypot_not_supported: "chaîne non supportée par honeypot.is",
+  honeypot_risk_or_honeypot: "honeypot/risque trop élevé",
+  processing_error: "erreur pendant processProfile"
+};
+
 let isPolling = false;
 let emptyProfilesStreak = 0;
+let hourlyStats = createFreshHourlyStats();
 
 process.on("uncaughtException", (err) => {
   logger.error({ err }, "Uncaught exception");
+  void notifyOpsError("uncaughtException", err);
 });
 process.on("unhandledRejection", (err) => {
   logger.error({ err }, "Unhandled rejection");
+  void notifyOpsError("unhandledRejection", err);
 });
+
+function createFreshHourlyStats() {
+  return {
+    windowStart: new Date(),
+    discovered: 0,
+    watchedChain: 0,
+    sent: 0,
+    filteredReasons: {},
+    scamReasons: {
+      honeypotDetected: 0,
+      scoreTooHigh: 0,
+      tradeSimulationFailed: 0,
+      honeypotApiIssue: 0,
+      chainNotSupported: 0
+    },
+    runtimeErrors: 0
+  };
+}
+
+function incrementCounter(bucket, key, delta = 1) {
+  bucket[key] = (bucket[key] || 0) + delta;
+}
+
+function recordFilterReason(reason) {
+  incrementCounter(hourlyStats.filteredReasons, reason);
+}
+
+function recordRuntimeError() {
+  hourlyStats.runtimeErrors += 1;
+}
+
+function recordHoneypotBlock(hp) {
+  if (!hp?.supported) {
+    hourlyStats.scamReasons.chainNotSupported += 1;
+    return;
+  }
+
+  if (hp.isHoneypot) {
+    hourlyStats.scamReasons.honeypotDetected += 1;
+  }
+  if (Number(hp.riskScore) >= config.riskScoreThreshold) {
+    hourlyStats.scamReasons.scoreTooHigh += 1;
+  }
+  if (hp.buyFailed || hp.sellFailed) {
+    hourlyStats.scamReasons.tradeSimulationFailed += 1;
+  }
+
+  const reason = (hp.reason || "").toString().toLowerCase();
+  if (reason.startsWith("http") || reason.includes("exception")) {
+    hourlyStats.scamReasons.honeypotApiIssue += 1;
+  }
+}
+
+function truncate(text, maxLength) {
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
+function normalizeError(error) {
+  if (error instanceof Error) {
+    return { message: error.message, stack: error.stack || "" };
+  }
+  if (typeof error === "string") {
+    return { message: error, stack: "" };
+  }
+  try {
+    return { message: JSON.stringify(error), stack: "" };
+  } catch {
+    return { message: String(error), stack: "" };
+  }
+}
+
+async function sendOpsChannelMessage(content) {
+  if (!config.opsChannelId) return false;
+
+  try {
+    await sendToChannel(client, config.opsChannelId, {
+      content: truncate(content, MAX_DISCORD_MESSAGE_LENGTH)
+    });
+    return true;
+  } catch (error) {
+    logger.error({ err: error, channelId: config.opsChannelId }, "Impossible d'envoyer un message ops");
+    return false;
+  }
+}
+
+async function notifyOpsError(context, error, extra = {}) {
+  recordRuntimeError();
+
+  const normalized = normalizeError(error);
+  const stack = truncate(normalized.stack, MAX_ERROR_STACK_LENGTH);
+  const extraText = Object.entries(extra)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `- ${key}: \`${String(value)}\``)
+    .join("\n");
+
+  const lines = [
+    "🚨 **Erreur bot détectée**",
+    `Contexte: \`${context}\``,
+    `Message: \`${truncate(normalized.message, 220)}\``
+  ];
+
+  if (extraText) {
+    lines.push("Détails:");
+    lines.push(extraText);
+  }
+
+  if (stack) {
+    lines.push("Stack:");
+    lines.push(`\`\`\`\n${stack}\n\`\`\``);
+  }
+
+  await sendOpsChannelMessage(lines.join("\n"));
+}
 
 function remember(id) {
   if (seenIds.has(id)) return;
@@ -45,10 +175,10 @@ function buildTokenId(profile) {
   return `${chain.toLowerCase()}:${address.toLowerCase()}`;
 }
 
-async function processProfile(profile) {
-  const tokenId = buildTokenId(profile);
+async function processProfile(profile, tokenId = buildTokenId(profile)) {
   const tokenAddress = profile.tokenAddress || profile.address || profile.id;
   if (!tokenAddress) {
+    recordFilterReason("no_token_address");
     logger.info({ tokenId, reason: "no_token_address" }, "Profil ignoré");
     return;
   }
@@ -58,6 +188,7 @@ async function processProfile(profile) {
     logger.info({ tokenId, chain: profile.chainId, pairs: pairs.length }, "Profil reçu");
 
     if (!pairs.length) {
+      recordFilterReason("no_pairs");
       logger.info({ tokenId, reason: "no_pairs" }, "Token filtré");
       return;
     }
@@ -65,17 +196,22 @@ async function processProfile(profile) {
     const bestPairs = selectBestPairs(pairs, config.maxPairsPerToken);
     const primary = bestPairs[0];
     if (!primary) {
+      recordFilterReason("no_primary_pair");
       logger.info({ tokenId, reason: "no_primary_pair" }, "Token filtré");
       return;
     }
 
     const hp = await runHoneypotCheck(profile.chainId, tokenAddress, primary.pairAddress);
     if (!hp.supported) {
+      recordFilterReason("honeypot_not_supported");
+      recordHoneypotBlock(hp);
       logger.info({ tokenId, reason: "honeypot_not_supported", chain: profile.chainId }, "Token filtré");
       return;
     }
 
     if (!hp.ok || hp.riskScore >= config.riskScoreThreshold) {
+      recordFilterReason("honeypot_risk_or_honeypot");
+      recordHoneypotBlock(hp);
       logger.info(
         {
           tokenId,
@@ -98,6 +234,7 @@ async function processProfile(profile) {
     });
 
     await sendToChannel(client, config.targetChannelId, payload);
+    hourlyStats.sent += 1;
     logger.info(
       {
         tokenId,
@@ -108,7 +245,68 @@ async function processProfile(profile) {
       "Token envoyé au channel cible"
     );
   } catch (error) {
+    recordFilterReason("processing_error");
     logger.error({ err: error, tokenId }, "Erreur pendant le traitement du token");
+    await notifyOpsError("processProfile", error, {
+      tokenId,
+      chain: profile.chainId,
+      tokenAddress
+    });
+  }
+}
+
+function formatDate(date) {
+  return new Intl.DateTimeFormat("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function formatReasonLines(bucket, fallback = "Aucune") {
+  const entries = Object.entries(bucket).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return `- ${fallback}`;
+  return entries.map(([reason, count]) => `- ${FILTER_REASON_LABELS[reason] || reason}: **${count}**`).join("\n");
+}
+
+async function sendHourlyRecap() {
+  const snapshot = hourlyStats;
+  const now = new Date();
+
+  const filteredTotal = Object.values(snapshot.filteredReasons).reduce((sum, value) => sum + value, 0);
+  const scamBlocked = snapshot.filteredReasons.honeypot_risk_or_honeypot || 0;
+
+  const content = [
+    "📊 **Récap horaire snip-bot**",
+    `Période: \`${formatDate(snapshot.windowStart)}\` → \`${formatDate(now)}\``,
+    `Tokens découverts (nouveaux): **${snapshot.discovered}**`,
+    `Tokens sur chaînes surveillées: **${snapshot.watchedChain}**`,
+    `Tokens envoyés au channel cible: **${snapshot.sent}**`,
+    `Tokens filtrés (tous motifs): **${filteredTotal}**`,
+    "",
+    "🛡️ **Détail scam (honeypot.is)**",
+    `- Filtrés comme scam/risque: **${scamBlocked}**`,
+    `- Suspectés honeypot.is (isHoneypot=true): **${snapshot.scamReasons.honeypotDetected}**`,
+    `- Score >= seuil (${config.riskScoreThreshold}): **${snapshot.scamReasons.scoreTooHigh}**`,
+    `- Simulation buy/sell en échec: **${snapshot.scamReasons.tradeSimulationFailed}**`,
+    `- Erreur API honeypot (HTTP/exception): **${snapshot.scamReasons.honeypotApiIssue}**`,
+    `- Chaîne non supportée honeypot.is: **${snapshot.scamReasons.chainNotSupported}**`,
+    "- Autres scanners: **0** (non configurés actuellement)",
+    "",
+    "📉 **Raisons de filtrage**",
+    formatReasonLines(snapshot.filteredReasons, "Aucun token filtré"),
+    "",
+    `⚠️ Erreurs runtime: **${snapshot.runtimeErrors}**`
+  ].join("\n");
+
+  const sent = await sendOpsChannelMessage(content);
+  if (sent) {
+    logger.info({ recap: snapshot }, "Récap horaire envoyé");
+    hourlyStats = createFreshHourlyStats();
   }
 }
 
@@ -147,20 +345,25 @@ async function poll() {
 
     // Traiter du plus ancien au plus récent pour éviter les doublons si la page est triée desc
     for (const profile of profiles.reverse()) {
+      const tokenId = buildTokenId(profile);
+      if (seenIds.has(tokenId)) continue;
+
+      remember(tokenId);
+      hourlyStats.discovered += 1;
+
       const chain = (profile?.chainId || profile?.chain || "").toLowerCase();
       if (!config.watchedChains.includes(chain)) {
-        remember(buildTokenId(profile)); // pour éviter re-check constant
-        logger.info({ tokenId: buildTokenId(profile), chain, reason: "chain_not_watched" }, "Token filtré");
+        recordFilterReason("chain_not_watched");
+        logger.info({ tokenId, chain, reason: "chain_not_watched" }, "Token filtré");
         continue;
       }
 
-      const tokenId = buildTokenId(profile);
-      if (seenIds.has(tokenId)) continue;
-      remember(tokenId);
-      await processProfile(profile);
+      hourlyStats.watchedChain += 1;
+      await processProfile(profile, tokenId);
     }
   } catch (error) {
     logger.error({ err: error }, "Erreur lors du polling Dexscreener");
+    await notifyOpsError("poll", error);
   } finally {
     isPolling = false;
   }
@@ -171,7 +374,9 @@ async function start() {
   logger.info(
     {
       pollIntervalMs: config.pollIntervalMs,
-      chains: config.watchedChains
+      recapIntervalMs: config.hourlyRecapIntervalMs,
+      chains: config.watchedChains,
+      opsChannelId: config.opsChannelId
     },
     "Bot démarré"
   );
@@ -202,10 +407,17 @@ async function start() {
   }
 
   await poll();
-  setInterval(poll, config.pollIntervalMs);
+  setInterval(() => {
+    void poll();
+  }, config.pollIntervalMs);
+
+  setInterval(() => {
+    void sendHourlyRecap();
+  }, config.hourlyRecapIntervalMs);
 }
 
-start().catch((error) => {
+start().catch(async (error) => {
   logger.error({ err: error }, "Impossible de démarrer le bot");
+  await notifyOpsError("start", error);
   process.exit(1);
 });
