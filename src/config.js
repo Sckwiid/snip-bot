@@ -24,6 +24,7 @@ export const config = {
   riskScoreThreshold: Number(process.env.RISK_SCORE_THRESHOLD || 60),
   dexscreenerBase: process.env.DEXSCREENER_BASE || "https://api.dexscreener.com",
   honeypotBase: process.env.HONEYPOT_BASE || "https://api.honeypot.is",
+  goplusBase: process.env.GOPLUS_BASE || "https://api.gopluslabs.io",
   sourceMode: process.env.SOURCE_MODE || "profiles_then_boosts", // profiles_only, boosts_only, profiles_then_boosts
   startChannelId: process.env.START_CHANNEL_ID || process.env.DISCORD_CHANNEL_ID,
   startMentionRoleId: process.env.START_MENTION_ROLE_ID || process.env.MENTION_ROLE_ID,
@@ -33,7 +34,8 @@ export const config = {
   logLevel: process.env.LOG_LEVEL || "info",
   sendMockOnStart: process.env.SEND_MOCK_ON_START !== "false",
   fetchRetries: Number(process.env.FETCH_RETRIES || 2),
-  fetchRetryBaseMs: Number(process.env.FETCH_RETRY_BASE_MS || 700)
+  fetchRetryBaseMs: Number(process.env.FETCH_RETRY_BASE_MS || 700),
+  enforceMintOwnerFilter: process.env.ENFORCE_MINT_OWNER_FILTER !== "false"
 };
 
 export function assertConfig() {

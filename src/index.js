@@ -12,6 +12,7 @@ import { runHoneypotCheck } from "./honeypot.js";
 import { logger } from "./logger.js";
 import { buildEmbed } from "./messageFormatter.js";
 import { buildMockPayloads } from "./mock.js";
+import { runTokenSecurityCheck } from "./tokenSecurity.js";
 
 assertConfig();
 
@@ -29,6 +30,7 @@ const FILTER_REASON_LABELS = {
   no_primary_pair: "pair principale introuvable",
   honeypot_not_supported: "chaîne non supportée par honeypot.is",
   honeypot_risk_or_honeypot: "honeypot/risque trop élevé",
+  mintable_owner_active: "mint activable (owner non renoncé)",
   processing_error: "erreur pendant processProfile"
 };
 
@@ -57,7 +59,22 @@ function createFreshHourlyStats() {
       scoreTooHigh: 0,
       tradeSimulationFailed: 0,
       honeypotApiIssue: 0,
-      chainNotSupported: 0
+      chainNotSupported: 0,
+      mintableByOwner: 0
+    },
+    tokenSecurity: {
+      checked: 0,
+      unavailable: 0,
+      unsupportedChain: 0,
+      lpLocked: 0,
+      lpUnlocked: 0,
+      lpUnknown: 0,
+      teamLocked: 0,
+      teamPartial: 0,
+      teamUnlocked: 0,
+      teamUnknown: 0,
+      fixedSupply: 0,
+      mintable: 0
     },
     runtimeErrors: 0
   };
@@ -95,6 +112,32 @@ function recordHoneypotBlock(hp) {
   if (reason.startsWith("http") || reason.includes("exception")) {
     hourlyStats.scamReasons.honeypotApiIssue += 1;
   }
+}
+
+function recordTokenSecurityStats(tokenSecurity) {
+  if (!tokenSecurity?.supported) {
+    hourlyStats.tokenSecurity.unsupportedChain += 1;
+    return;
+  }
+
+  if (!tokenSecurity?.available) {
+    hourlyStats.tokenSecurity.unavailable += 1;
+    return;
+  }
+
+  hourlyStats.tokenSecurity.checked += 1;
+
+  if (tokenSecurity.lp?.status === "locked") hourlyStats.tokenSecurity.lpLocked += 1;
+  else if (tokenSecurity.lp?.status === "unlocked") hourlyStats.tokenSecurity.lpUnlocked += 1;
+  else hourlyStats.tokenSecurity.lpUnknown += 1;
+
+  if (tokenSecurity.team?.status === "locked") hourlyStats.tokenSecurity.teamLocked += 1;
+  else if (tokenSecurity.team?.status === "partial") hourlyStats.tokenSecurity.teamPartial += 1;
+  else if (tokenSecurity.team?.status === "unlocked") hourlyStats.tokenSecurity.teamUnlocked += 1;
+  else hourlyStats.tokenSecurity.teamUnknown += 1;
+
+  if (tokenSecurity.supply?.fixedSupply) hourlyStats.tokenSecurity.fixedSupply += 1;
+  if (tokenSecurity.supply?.mintable) hourlyStats.tokenSecurity.mintable += 1;
 }
 
 function truncate(text, maxLength) {
@@ -221,6 +264,29 @@ async function processProfile(profile, tokenId = buildTokenId(profile)) {
       return;
     }
 
+    const tokenSecurity = await runTokenSecurityCheck(profile.chainId, tokenAddress);
+    recordTokenSecurityStats(tokenSecurity);
+
+    if (
+      tokenSecurity.supported &&
+      tokenSecurity.available &&
+      tokenSecurity.supply?.mintable &&
+      !tokenSecurity.supply?.ownerRenounced &&
+      config.enforceMintOwnerFilter
+    ) {
+      recordFilterReason("mintable_owner_active");
+      hourlyStats.scamReasons.mintableByOwner += 1;
+      logger.info(
+        {
+          tokenId,
+          ownerAddress: tokenSecurity.supply.ownerAddress,
+          canTakeBackOwnership: tokenSecurity.supply.canTakeBackOwnership
+        },
+        "Token filtré (mint activable par owner)"
+      );
+      return;
+    }
+
     const hp = await runHoneypotCheck(profile.chainId, tokenAddress, primary.pairAddress);
     if (!hp.supported) {
       recordFilterReason("honeypot_not_supported");
@@ -250,6 +316,7 @@ async function processProfile(profile, tokenId = buildTokenId(profile)) {
       pair: primary,
       honeypot: hp,
       lockInfo,
+      tokenSecurity,
       mentionRoleId: config.mentionRoleId
     });
 
@@ -299,6 +366,8 @@ async function sendHourlyRecap() {
 
   const filteredTotal = Object.values(snapshot.filteredReasons).reduce((sum, value) => sum + value, 0);
   const scamBlocked = snapshot.filteredReasons.honeypot_risk_or_honeypot || 0;
+  const mintableOwnerBlocked = snapshot.filteredReasons.mintable_owner_active || 0;
+  const tokenSecurity = snapshot.tokenSecurity || {};
 
   const content = [
     "📊 **Récap horaire snip-bot**",
@@ -315,7 +384,15 @@ async function sendHourlyRecap() {
     `- Simulation buy/sell en échec: **${snapshot.scamReasons.tradeSimulationFailed}**`,
     `- Erreur API honeypot (HTTP/exception): **${snapshot.scamReasons.honeypotApiIssue}**`,
     `- Chaîne non supportée honeypot.is: **${snapshot.scamReasons.chainNotSupported}**`,
-    "- Autres scanners: **0** (non configurés actuellement)",
+    "",
+    "🔐 **Checks on-chain (LP/team/supply)**",
+    `- Tokens checkés via GoPlus: **${tokenSecurity.checked || 0}**`,
+    `- LP locked / unlocked / inconnu: **${tokenSecurity.lpLocked || 0}** / **${tokenSecurity.lpUnlocked || 0}** / **${tokenSecurity.lpUnknown || 0}**`,
+    `- Team locked / partiel / unlocked / inconnu: **${tokenSecurity.teamLocked || 0}** / **${tokenSecurity.teamPartial || 0}** / **${tokenSecurity.teamUnlocked || 0}** / **${tokenSecurity.teamUnknown || 0}**`,
+    `- Supply fixe / mintable: **${tokenSecurity.fixedSupply || 0}** / **${tokenSecurity.mintable || 0}**`,
+    `- Bloqués car mintable + owner actif: **${mintableOwnerBlocked}**`,
+    `- Check GoPlus indisponible: **${tokenSecurity.unavailable || 0}**`,
+    `- Chaîne non supportée GoPlus: **${tokenSecurity.unsupportedChain || 0}**`,
     "",
     "📉 **Raisons de filtrage**",
     formatReasonLines(snapshot.filteredReasons, "Aucun token filtré"),
@@ -396,7 +473,8 @@ async function start() {
       pollIntervalMs: config.pollIntervalMs,
       recapIntervalMs: config.hourlyRecapIntervalMs,
       chains: config.watchedChains,
-      opsChannelId: config.opsChannelId
+      opsChannelId: config.opsChannelId,
+      enforceMintOwnerFilter: config.enforceMintOwnerFilter
     },
     "Bot démarré"
   );

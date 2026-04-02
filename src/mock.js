@@ -38,12 +38,21 @@ export function buildMockPayloads({ mentionRoleId }) {
     sellFailed: false
   };
 
+  const mockTokenSecurity = {
+    supported: true,
+    available: true,
+    lp: { status: "locked", lockedFraction: 0.82 },
+    team: { status: "partial", lockedFraction: 0.11 },
+    supply: { fixedSupply: true, ownerRenounced: true }
+  };
+
   const lockInfo = deriveLiquidityLock(mockPair);
   const embedOk = buildEmbed({
     profile: mockProfile,
     pair: mockPair,
     honeypot: mockHpOk,
     lockInfo,
+    tokenSecurity: mockTokenSecurity,
     mentionRoleId
   });
 
@@ -53,6 +62,7 @@ export function buildMockPayloads({ mentionRoleId }) {
     pair: { ...mockPair, priceUsd: 0.00042, liquidity: { usd: 4200, base: 1_100_000, quote: 4200 } },
     honeypot: mockHpWarn,
     lockInfo,
+    tokenSecurity: { ...mockTokenSecurity, lp: { status: "unlocked", lockedFraction: 0 } },
     mentionRoleId
   });
 

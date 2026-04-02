@@ -30,7 +30,49 @@ function formatTaxes(hp) {
   return `Buy ${buy} ${buyFail} • Sell ${sell} ${sellFail}`;
 }
 
-export function buildEmbed({ profile, pair, honeypot, lockInfo, mentionRoleId }) {
+function formatFractionAsPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return "0.00%";
+  return `${(numeric * 100).toFixed(2)}%`;
+}
+
+function formatTokenSecurity(tokenSecurity) {
+  if (!tokenSecurity?.supported) {
+    return "Source: GoPlus non supporte sur cette chaine";
+  }
+
+  if (!tokenSecurity?.available) {
+    return `Source: GoPlus indisponible (${tokenSecurity.reason || "raison inconnue"})`;
+  }
+
+  let lpLabel = "LP inconnu";
+  if (tokenSecurity.lp?.status === "locked") {
+    lpLabel = `LP locked (${formatFractionAsPercent(tokenSecurity.lp.lockedFraction)})`;
+  } else if (tokenSecurity.lp?.status === "unlocked") {
+    lpLabel = "LP unlocked";
+  }
+
+  let teamLabel = "Team lock inconnu";
+  const knownTeamPercent = formatFractionAsPercent(tokenSecurity.team?.knownTeamFraction || 0);
+  if (tokenSecurity.team?.status === "locked") {
+    teamLabel = `Team locked (${formatFractionAsPercent(tokenSecurity.team.lockedFraction)} / exp. ${knownTeamPercent})`;
+  } else if (tokenSecurity.team?.status === "partial") {
+    teamLabel = `Team lock partiel (${formatFractionAsPercent(tokenSecurity.team.lockedFraction)} / exp. ${knownTeamPercent})`;
+  } else if (tokenSecurity.team?.status === "unlocked") {
+    teamLabel = `Team unlocked (exp. ${knownTeamPercent})`;
+  }
+
+  const supplyLabel = tokenSecurity.supply?.fixedSupply ? "Supply fixe (mint off)" : "Supply non fixe (mint on)";
+  const ownerLabel = tokenSecurity.supply?.ownerRenounced
+    ? "Owner renonce"
+    : tokenSecurity.supply?.ownerUnknown
+    ? "Owner inconnu"
+    : "Owner actif";
+
+  return `${lpLabel}\n${teamLabel}\n${supplyLabel} • ${ownerLabel}`;
+}
+
+export function buildEmbed({ profile, pair, honeypot, lockInfo, tokenSecurity, mentionRoleId }) {
   const risk = pickRiskColor(honeypot.riskScore);
   const baseSymbol = pair?.baseToken?.symbol || "BASE";
   const quoteSymbol = pair?.quoteToken?.symbol || "QUOTE";
@@ -57,6 +99,10 @@ export function buildEmbed({ profile, pair, honeypot, lockInfo, mentionRoleId })
     {
       name: "Lock LP",
       value: formatLockInfo(lockInfo)
+    },
+    {
+      name: "Security (on-chain)",
+      value: formatTokenSecurity(tokenSecurity)
     },
     {
       name: "Volume 24h",
