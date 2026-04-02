@@ -20,6 +20,18 @@ const CHAIN_ID_MAP = {
   ftm: 250
 };
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function describeFetchError(error) {
+  const message = error?.message || String(error);
+  const cause = error?.cause;
+  if (!cause || typeof cause !== "object") return message;
+  const details = [cause.code, cause.errno, cause.syscall, cause.hostname].filter(Boolean);
+  return details.length ? `${message} (${details.join(" | ")})` : message;
+}
+
 function normalizeChainId(chainId) {
   if (!chainId) return undefined;
   const key = chainId.toString().toLowerCase();
@@ -87,16 +99,38 @@ export async function runHoneypotCheck(chainId, tokenAddress, pairAddress) {
   url.searchParams.set("chainID", numericChain);
   if (pairAddress) url.searchParams.set("pair", pairAddress);
 
-  try {
-    const res = await fetch(url, { headers: { accept: "application/json" } });
-    if (!res.ok) {
-      logger.warn({ status: res.status }, "Honeypot.is HTTP non OK");
-      return { supported: true, ok: false, isHoneypot: true, riskScore: 100, reason: `HTTP ${res.status}` };
+  const retries = Math.max(0, Number(config.fetchRetries || 2));
+  const baseDelayMs = Math.max(100, Number(config.fetchRetryBaseMs || 700));
+
+  for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
+    try {
+      const res = await fetch(url, { headers: { accept: "application/json" } });
+      if (!res.ok) {
+        logger.warn({ status: res.status }, "Honeypot.is HTTP non OK");
+        return { supported: true, ok: false, isHoneypot: true, riskScore: 100, reason: `HTTP ${res.status}` };
+      }
+      const payload = await res.json();
+      return normalizeHoneypot(payload);
+    } catch (error) {
+      if (attempt > retries) {
+        logger.error({ err: error, errorSummary: describeFetchError(error) }, "Erreur appel Honeypot.is");
+        return {
+          supported: true,
+          ok: false,
+          isHoneypot: true,
+          riskScore: 100,
+          reason: `Exception réseau: ${describeFetchError(error)}`
+        };
+      }
+
+      const delayMs = baseDelayMs * attempt;
+      logger.warn(
+        { attempt, retries, delayMs, err: error, errorSummary: describeFetchError(error) },
+        "Honeypot.is temporairement indisponible, retry"
+      );
+      await wait(delayMs);
     }
-    const payload = await res.json();
-    return normalizeHoneypot(payload);
-  } catch (error) {
-    logger.error({ err: error }, "Erreur appel Honeypot.is");
-    return { supported: true, ok: false, isHoneypot: true, riskScore: 100, reason: "Exception réseau" };
   }
+
+  return { supported: true, ok: false, isHoneypot: true, riskScore: 100, reason: "Exception réseau" };
 }

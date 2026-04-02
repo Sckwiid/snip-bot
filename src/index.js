@@ -103,16 +103,26 @@ function truncate(text, maxLength) {
 }
 
 function normalizeError(error) {
+  const cause = error?.cause && typeof error.cause === "object" ? error.cause : null;
+  const causeDetails = cause
+    ? {
+        code: cause.code || null,
+        errno: cause.errno || null,
+        syscall: cause.syscall || null,
+        hostname: cause.hostname || null
+      }
+    : null;
+
   if (error instanceof Error) {
-    return { message: error.message, stack: error.stack || "" };
+    return { message: error.message, stack: error.stack || "", causeDetails };
   }
   if (typeof error === "string") {
-    return { message: error, stack: "" };
+    return { message: error, stack: "", causeDetails };
   }
   try {
-    return { message: JSON.stringify(error), stack: "" };
+    return { message: JSON.stringify(error), stack: "", causeDetails };
   } catch {
-    return { message: String(error), stack: "" };
+    return { message: String(error), stack: "", causeDetails };
   }
 }
 
@@ -135,6 +145,12 @@ async function notifyOpsError(context, error, extra = {}) {
 
   const normalized = normalizeError(error);
   const stack = truncate(normalized.stack, MAX_ERROR_STACK_LENGTH);
+  const causeText = normalized.causeDetails
+    ? Object.entries(normalized.causeDetails)
+        .filter(([, value]) => value)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(", ")
+    : "";
   const extraText = Object.entries(extra)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .map(([key, value]) => `- ${key}: \`${String(value)}\``)
@@ -149,6 +165,10 @@ async function notifyOpsError(context, error, extra = {}) {
   if (extraText) {
     lines.push("Détails:");
     lines.push(extraText);
+  }
+
+  if (causeText) {
+    lines.push(`Cause réseau: \`${causeText}\``);
   }
 
   if (stack) {

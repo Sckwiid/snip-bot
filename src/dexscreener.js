@@ -1,6 +1,73 @@
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function describeFetchError(error) {
+  const message = error?.message || String(error);
+  const cause = error?.cause;
+  if (!cause || typeof cause !== "object") return message;
+
+  const details = [cause.code, cause.errno, cause.syscall, cause.hostname].filter(Boolean);
+  return details.length ? `${message} (${details.join(" | ")})` : message;
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function fetchWithRetry(url, label, options = {}) {
+  const retries = Math.max(0, Number(config.fetchRetries || 2));
+  const baseDelayMs = Math.max(100, Number(config.fetchRetryBaseMs || 700));
+
+  let lastError;
+
+  for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
+    try {
+      const res = await fetch(url, options);
+
+      if (!res.ok && isRetryableStatus(res.status) && attempt <= retries) {
+        const delayMs = baseDelayMs * attempt;
+        logger.warn(
+          { label, status: res.status, attempt, retries, delayMs },
+          "Dexscreener HTTP temporaire, retry"
+        );
+        await wait(delayMs);
+        continue;
+      }
+
+      return res;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt > retries) {
+        throw new Error(
+          `Dexscreener ${label} fetch failed après ${attempt} tentative(s): ${describeFetchError(error)}`,
+          { cause: error }
+        );
+      }
+
+      const delayMs = baseDelayMs * attempt;
+      logger.warn(
+        {
+          label,
+          attempt,
+          retries,
+          delayMs,
+          err: error,
+          errorSummary: describeFetchError(error)
+        },
+        "Dexscreener fetch temporairement indisponible, retry"
+      );
+      await wait(delayMs);
+    }
+  }
+
+  throw lastError || new Error(`Dexscreener ${label} fetch failed (unknown)`);
+}
+
 async function getJsonWithDebug(res, label) {
   const contentType = res.headers.get("content-type");
   const text = await res.text();
@@ -22,7 +89,7 @@ async function safeJson(res, label = "unknown") {
 
 export async function fetchLatestTokenProfiles(limit = 25) {
   const url = `${config.dexscreenerBase}/token-profiles/latest/v1`;
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, "latest-token-profiles", {
     headers: {
       accept: "application/json",
       "user-agent": "snip-bot/1.0 (+github.com/)"
@@ -59,7 +126,7 @@ export async function fetchLatestTokenProfiles(limit = 25) {
 
 export async function fetchLatestBoosts(limit = 25) {
   const url = `${config.dexscreenerBase}/token-boosts/latest/v1`;
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, "latest-boosts", {
     headers: {
       accept: "application/json",
       "user-agent": "snip-bot/1.0 (+github.com/)"
@@ -104,7 +171,7 @@ export async function fetchLatestBoosts(limit = 25) {
 export async function fetchPairsForToken(chainId, tokenAddress) {
   const query = chainId ? `?chainId=${chainId}` : "";
   const url = `${config.dexscreenerBase}/latest/dex/tokens/${tokenAddress}${query}`;
-  const res = await fetch(url, { headers: { accept: "application/json" } });
+  const res = await fetchWithRetry(url, "token-pairs", { headers: { accept: "application/json" } });
 
   if (!res.ok) {
     throw new Error(`Dexscreener pairs HTTP ${res.status}`);
@@ -153,5 +220,5 @@ export function deriveLiquidityLock(pair) {
       reason: "Flag isLocked depuis Dexscreener"
     };
   }
-  return { locked: null, reason: "Non communiqué" };
+  return { locked: null, reason: "Non communiqué par Dexscreener" };
 }

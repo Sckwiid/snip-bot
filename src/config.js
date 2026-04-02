@@ -31,7 +31,9 @@ export const config = {
     ? process.env.CHAINS.split(",").map((c) => c.trim().toLowerCase()).filter(Boolean)
     : DEFAULT_CHAINS,
   logLevel: process.env.LOG_LEVEL || "info",
-  sendMockOnStart: process.env.SEND_MOCK_ON_START !== "false"
+  sendMockOnStart: process.env.SEND_MOCK_ON_START !== "false",
+  fetchRetries: Number(process.env.FETCH_RETRIES || 2),
+  fetchRetryBaseMs: Number(process.env.FETCH_RETRY_BASE_MS || 700)
 };
 
 export function assertConfig() {

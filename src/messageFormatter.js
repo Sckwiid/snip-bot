@@ -1,19 +1,25 @@
 import { formatNumber, formatPercent, formatUsd, pickRiskColor, shortAddress } from "./format.js";
 
-function formatLiquidity(pair, lockInfo) {
+function formatLiquidity(pair) {
   const baseSymbol = pair?.baseToken?.symbol || "BASE";
   const quoteSymbol = pair?.quoteToken?.symbol || "QUOTE";
   const usd = formatUsd(pair?.liquidity?.usd);
   const base = formatNumber(pair?.liquidity?.base);
   const quote = formatNumber(pair?.liquidity?.quote);
-  const lockStatus =
-    lockInfo.locked === null
-      ? "🔒 ?"
-      : lockInfo.locked
-      ? "🔒 Locked"
-      : "🔓 Unlocked";
 
-  return `${usd} (${base} ${baseSymbol} / ${quote} ${quoteSymbol}) • ${lockStatus}`;
+  return `${usd} (${base} ${baseSymbol} / ${quote} ${quoteSymbol})`;
+}
+
+function formatLockInfo(lockInfo) {
+  if (!lockInfo || lockInfo.locked === null) {
+    return "❔ LP lock inconnu (Dexscreener ne fournit pas cette info).\nCe statut concerne la liquidité LP, pas le lock de supply.";
+  }
+
+  if (lockInfo.locked) {
+    return `🔒 LP locked\nRaison: ${lockInfo.reason || "détecté par Dexscreener"}`;
+  }
+
+  return `🔓 LP unlocked\nRaison: ${lockInfo.reason || "détecté par Dexscreener"}`;
 }
 
 function formatTaxes(hp) {
@@ -46,7 +52,11 @@ export function buildEmbed({ profile, pair, honeypot, lockInfo, mentionRoleId })
     },
     {
       name: "Liquidité",
-      value: formatLiquidity(pair, lockInfo)
+      value: formatLiquidity(pair)
+    },
+    {
+      name: "Lock LP",
+      value: formatLockInfo(lockInfo)
     },
     {
       name: "Volume 24h",
